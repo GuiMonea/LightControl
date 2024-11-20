@@ -1,0 +1,134 @@
+#include <ESP8266WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+
+// Definição das credenciais Wi-Fi
+#define WIFI_SSID "SuaRedeWiFi"
+#define WIFI_PASS "SenhaDaSuaRedeWiFi"
+
+// Definição das credenciais do Adafruit IO
+#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVERPORT  1883                   // Porta MQTT padrão
+#define AIO_USERNAME    "SeuUserName"
+#define AIO_KEY         "SuaChaveIO"
+
+// Definição do pino do LDR, Buzzer e limiares
+#define LDR_PIN A0
+#define BUZZER_PIN D1
+#define LDR_EXCESS_THRESHOLD 600   // Iluminação excessiva se valor for menor que 600
+#define LDR_NORMAL_THRESHOLD 1000  // Iluminação normal se valor for maior que 1000
+
+// Inicializando o cliente Wi-Fi
+WiFiClient client;
+
+// Inicializando o cliente MQTT para o Adafruit IO
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+// Inicializando os feeds do Adafruit IO
+Adafruit_MQTT_Publish lightDataFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/light-data");   // Feed para enviar dados do LDR (números invertidos)
+Adafruit_MQTT_Publish lightStatusFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/light-status"); // Feed para enviar status ("Normal" ou "Excessiva")
+
+// Variável para armazenar o estado anterior
+bool luzExcessiva = false;  // Estado anterior: falso = luz normal, verdadeiro = luz excessiva
+unsigned long previousNormalMillis = 0;  // Variável para controlar o envio periódico de luz normal
+const long intervalNormal = 5000;  // Intervalo de 5 segundos para envio de luz normal
+
+void connectWiFi() {
+  Serial.print("Conectando-se ao Wi-Fi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Conectado ao Wi-Fi!");
+}
+
+// Função para conectar ao MQTT
+void connectMQTT() {
+  int8_t ret;
+  while (mqtt.connected() == false) {
+    Serial.print("Conectando-se ao MQTT...");
+    ret = mqtt.connect();
+    if (ret == 0) {
+      Serial.println("Conectado ao MQTT!");
+    } else {
+      Serial.print("Falha ao conectar. Código de erro: ");
+      Serial.println(mqtt.connectErrorString(ret));  // Exibe o código de erro
+      Serial.println("Tentando novamente em 5 segundos...");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configurar o pino do buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);  // Inicialmente, o buzzer está desligado
+
+  connectWiFi();
+  connectMQTT();
+}
+
+void loop() {
+  // Garantir a conexão ao MQTT
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
+
+  // Ler o valor do sensor LDR
+  int ldrValue = analogRead(LDR_PIN);
+
+  // Transformar o valor do LDR para a escala invertida
+  int transformedLdrValue = 1000 - ldrValue;
+
+  Serial.print("Valor original do LDR: ");
+  Serial.println(ldrValue);
+  Serial.print("Valor transformado (invertido): ");
+  Serial.println(transformedLdrValue);
+
+  // Publicar o valor transformado do LDR no feed "light-data"
+  if (!lightDataFeed.publish(transformedLdrValue)) {
+    Serial.println("Falha ao enviar o valor do LDR ao Adafruit IO.");
+  } else {
+    Serial.println("Valor transformado do LDR enviado com sucesso ao Adafruit IO.");
+  }
+
+  // Verificar se a luz é excessiva ou normal
+  if (ldrValue < LDR_EXCESS_THRESHOLD && !luzExcessiva) {
+    // Detectou luz excessiva e o estado mudou
+    luzExcessiva = true;
+
+    // Publicar status de "Iluminação Excessiva" no Adafruit IO imediatamente
+    if (!lightStatusFeed.publish("Iluminação Excessiva")) {
+      Serial.println("Falha ao enviar status de iluminação excessiva.");
+    } else {
+      Serial.println("Status de iluminação excessiva enviado com sucesso.");
+    }
+
+    // Ligar o buzzer (alerta sonoro)
+    digitalWrite(BUZZER_PIN, HIGH);
+    Serial.println("Buzzer ligado (luz excessiva).");
+
+  } else if (ldrValue > LDR_NORMAL_THRESHOLD && luzExcessiva) {
+    // Detectou que a luz voltou ao normal e o estado mudou
+    luzExcessiva = false;
+
+    // Desligar o buzzer
+    digitalWrite(BUZZER_PIN, LOW);
+    Serial.println("Buzzer desligado (luz normal).");
+  }
+
+  // Envio periódico da luz normal a cada 5 segundos
+  unsigned long currentMillis = millis();
+  if (!luzExcessiva && (currentMillis - previousNormalMillis >= intervalNormal)) {
+    previousNormalMillis = currentMillis;  // Atualiza o tempo anterior
+
+    // Publicar status de "Iluminação Normal" no Adafruit IO
+    if (!lightStatusFeed.publish("Iluminação Normal")) {
+      Serial.println("Falha ao enviar status de iluminação normal.");
+    } else {
+      Serial.println("Status de iluminação normal enviado com sucesso.");
+    }
+  }
